@@ -1,0 +1,84 @@
+# Publica una release de GearLink al crear un tag vX.Y.Z.
+#
+# Garantías:
+#   - Solo se publica si el commit del tag está en main (los tags v* solo los puede crear @suprahh: ruleset).
+#   - La versión del tag debe coincidir con "## Version" de GearLink.toc.
+#   - El ZIP se arma aquí, desde el código del tag, sin archivos de desarrollo, y se publica su SHA256.
+#
+# Uso (en main, después de fusionar el PR de la versión):
+#   git tag v0.7.1 && git push origin v0.7.1
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # crear la release y subir el ZIP
+    steps:
+      - name: Descargar el código del tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verificar que el tag está en main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::El tag $GITHUB_REF_NAME no apunta a un commit de main. No se publica nada."
+            exit 1
+          fi
+
+      - name: Verificar la versión del .toc
+        id: version
+        run: |
+          TOC_VERSION=$(grep -m1 '^## Version:' GearLink.toc | sed 's/^## Version:[[:space:]]*//' | tr -d '\r')
+          if [ "v$TOC_VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::El tag es $GITHUB_REF_NAME pero GearLink.toc dice ## Version: $TOC_VERSION"
+            exit 1
+          fi
+          echo "version=$TOC_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Empaquetar el addon
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist/GearLink
+          rsync -a \
+            --exclude='.git' --exclude='.github' --exclude='.gitignore' --exclude='.gitattributes' --exclude='dist' \
+            ./ dist/GearLink/
+          cd dist
+          zip -r -q "GearLink-$VERSION.zip" GearLink
+          sha256sum "GearLink-$VERSION.zip" | tee "GearLink-$VERSION.zip.sha256"
+
+      - name: Publicar la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          SHA=$(cut -d' ' -f1 "dist/GearLink-$VERSION.zip.sha256")
+          {
+            echo "**Instalación:** WowUp → *Install from URL* → \`https://github.com/${GITHUB_REPOSITORY}\`, o descarga \`GearLink-$VERSION.zip\` (abajo) y descomprímelo en \`_classic_beta_\\Interface\\AddOns\`."
+            echo
+            echo "**SHA256 de \`GearLink-$VERSION.zip\`:** \`$SHA\`"
+            echo
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/GearLink-$VERSION.zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "GearLink v$VERSION" \
+            --notes-file notes.md \
+            --generate-notes
