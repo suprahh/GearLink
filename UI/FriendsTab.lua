@@ -360,6 +360,12 @@ local function BuildDetailPane(pane, onBack)
         local state = ns.Sync:GetState(key)
         local stateInfo = state and STATE_TEXT[state.state]
         local text = stateInfo and (stateInfo[2] .. stateInfo[1] .. "|r") or ""
+        if state and state.detail then
+            text = text .. " |cff808080(" .. tostring(state.detail) .. ")|r"
+        end
+        if snap and snap.skipped then
+            text = text .. "  |cffff8000" .. L.SYNC_SKIPPED:format(snap.skipped) .. "|r"
+        end
         if snap and snap.checkedAt then
             text = text .. "  |cff808080" .. L.CHECKED_AGO:format(ns.FormatAgo(time() - snap.checkedAt)) .. "|r"
         end
