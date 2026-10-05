@@ -67,8 +67,8 @@ function Sync:GetState(key)
     return states[key]
 end
 
-local function SetState(key, state)
-    states[key] = { state = state, at = time() }
+local function SetState(key, state, detail)
+    states[key] = { state = state, at = time(), detail = detail }
     GearLink:SendMessage(ns.MSG_FRIEND_SNAPSHOT, key)
 end
 
@@ -199,8 +199,12 @@ local function OnSnapshot(msg, c)
     local snap, reason = Snapshot.FromNetwork(msg)
     if not snap then
         ns.Debug("SNAPSHOT inválido de", c.key, reason)
-        SetState(c.key, S.INVALID)
+        SetState(c.key, S.INVALID, reason)
         return
+    end
+    if snap.skipped then
+        -- Items que no pasaron la validación: se descartan, el resto se muestra. El ejemplo ayuda a diagnosticar.
+        ns.Debug(("SNAPSHOT de %s: %d item(s) descartados. Ejemplo: %s"):format(c.key, snap.skipped, tostring(snap.skippedSample)))
     end
     snap.checkedAt = snap.receivedAt
     GearLink.db.global.friendSnapshots[c.key] = snap

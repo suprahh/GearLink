@@ -139,9 +139,12 @@ function Snapshot.ToNetwork(snap, includeBags)
     }
 end
 
+-- "item:ID:...". Solo letras, números, ':' y '-' (nada de '|' ni espacios, que permitirían inyectar códigos de
+-- formato). Las letras son necesarias: los items fabricados llevan el GUID del artesano ("Player-1234-0ABCDEF0").
 local function ValidItemString(s)
-    return type(s) == "string" and #s <= 250 and s:match("^item:[%d:%-]+$") ~= nil
+    return type(s) == "string" and #s <= 250 and s:match("^item:%d+[%w:%-]*$") ~= nil
 end
+Snapshot.ValidItemString = ValidItemString
 
 local function OptString(v, maxLen, pattern)
     if type(v) ~= "string" or #v == 0 or #v > maxLen then return nil end
@@ -149,36 +152,54 @@ local function OptString(v, maxLen, pattern)
     return v
 end
 
--- Convierte un SNAPSHOT recibido en un snapshot local. Devuelve nil, motivo si algo no es válido.
+-- Muestra corta y segura de un valor rechazado (para diagnóstico en /gl debug).
+local function Sample(v)
+    if type(v) ~= "string" then return type(v) end
+    return (v:sub(1, 80):gsub("|", "||"))
+end
+
+-- Convierte un SNAPSHOT recibido en un snapshot local.
+-- Estructura inválida (esquema, tipos) -> nil, motivo.
+-- Items sueltos inválidos -> se descartan uno a uno (snap.skipped, snap.skippedSample) y el resto se muestra.
 -- Nunca lanza errores: todo se comprueba antes de usarse.
 function Snapshot.FromNetwork(msg)
     if type(msg) ~= "table" then return nil, "no es tabla" end
     if msg.v ~= Snapshot.SCHEMA_VERSION then return nil, "esquema " .. tostring(msg.v) end
     if type(msg.e) ~= "table" then return nil, "sin equipo" end
+    if msg.b ~= nil and type(msg.b) ~= "table" then return nil, "bolsas inválidas" end
+
+    local skipped, sample = 0, nil
+    local function Skip(what)
+        skipped = skipped + 1
+        sample = sample or what
+    end
 
     local equipped, n = {}, 0
     for slot, itemString in pairs(msg.e) do
         n = n + 1
-        if n > 19 then return nil, "demasiados slots" end
+        if n > 40 then break end -- más de lo posible: se ignora el resto
         if type(slot) ~= "number" or slot < INVSLOT_FIRST_EQUIPPED or slot > INVSLOT_LAST_EQUIPPED or slot % 1 ~= 0 then
-            return nil, "slot inválido"
+            Skip("slot " .. Sample(tostring(slot)))
+        elseif not ValidItemString(itemString) then
+            Skip("slot " .. slot .. ": " .. Sample(itemString))
+        else
+            equipped[slot] = itemString
         end
-        if not ValidItemString(itemString) then return nil, "item inválido en slot " .. slot end
-        equipped[slot] = itemString
     end
 
     local bags = {}
     if msg.b ~= nil then
-        if type(msg.b) ~= "table" then return nil, "bolsas inválidas" end
-        for i = 1, MAX_BAG_ITEMS + 1 do
+        for i = 1, MAX_BAG_ITEMS do
             local entry = msg.b[i]
             if entry == nil then break end
-            if i > MAX_BAG_ITEMS then return nil, "demasiados items" end
-            if type(entry) ~= "table" or not ValidItemString(entry[1]) then return nil, "item de bolsa inválido" end
-            local count = tonumber(entry[2]) or 1
-            if count < 1 or count > 10000 then count = 1 end
-            local bind = CODE_TO_BIND[entry[3]] or "UNKNOWN"
-            bags[i] = { link = entry[1], count = math.floor(count), tradeable = TRADEABLE_BIND[bind] or false, bind = bind }
+            if type(entry) ~= "table" or not ValidItemString(entry[1]) then
+                Skip("bolsa " .. i .. ": " .. Sample(type(entry) == "table" and entry[1] or entry))
+            else
+                local count = tonumber(entry[2]) or 1
+                if count < 1 or count > 10000 then count = 1 end
+                local bind = CODE_TO_BIND[entry[3]] or "UNKNOWN"
+                bags[#bags + 1] = { link = entry[1], count = math.floor(count), tradeable = TRADEABLE_BIND[bind] or false, bind = bind }
+            end
         end
     end
 
@@ -202,6 +223,8 @@ function Snapshot.FromNetwork(msg)
         bags = bags,
         sharedBags = msg.sb ~= false and msg.b ~= nil,
         receivedAt = time(),
+        skipped = skipped > 0 and skipped or nil,
+        skippedSample = sample,
     }
 end
 

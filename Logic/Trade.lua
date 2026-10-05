@@ -170,9 +170,7 @@ end
 -- Recibir ofertas
 ---------------------------------------------------------------------------
 
-local function ValidItemString(s)
-    return type(s) == "string" and #s <= 250 and s:match("^item:[%d:%-]+$") ~= nil
-end
+local ValidItemString = Snapshot.ValidItemString -- misma validación que los snapshots (acepta items fabricados)
 
 local function OnOffer(msg, c)
     if not GearLink.db.global.receiveOffers then return end
