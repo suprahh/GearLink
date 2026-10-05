@@ -46,6 +46,8 @@ local STAT_KEYS = {
     RESISTANCE0_NAME = "ARMOR",
 }
 local PRIMARY = { STR = true, AGI = true, INT = true }
+-- Un stat principal con peso menor que esto "no le sirve" al rol (ej. Intelecto para un guerrero).
+local USEFUL_PRIMARY_WEIGHT = 0.5
 
 local function GetWeights(snap)
     local W = ns.StatWeights
@@ -236,15 +238,16 @@ function Upgrade:Evaluate(itemLink, snap)
     local ok, why = self:CanUse(data, snap.class, snap.level)
     if not ok then return false, 0, why end
 
-    -- 2. Stat principal
-    local hasPrimary, matchesPrimary = false, false
-    for stat in pairs(data.stats) do
-        if PRIMARY[stat] then
-            hasPrimary = true
-            if stat == snap.mainStat then matchesPrimary = true end
-        end
+    -- 2. Stat principal: el item no debe ser "para otro rol". Se compara lo que aporta al rol del amigo (stats con
+    --    peso, armadura incluida para tanques) contra los stats principales que no le sirven (peso < 0.5).
+    --    Ej.: un escudo con +1 Intelecto, +1 Aguante y más armadura SÍ le sirve a un guerrero tanque;
+    --    una túnica de Intelecto/Espíritu, no.
+    local weights = GetWeights(snap)
+    local useless = 0
+    for stat, value in pairs(data.stats) do
+        if PRIMARY[stat] and (weights[stat] or 0) < USEFUL_PRIMARY_WEIGHT then useless = useless + value end
     end
-    if hasPrimary and not matchesPrimary then return false, 0, L.WHY_STAT end
+    if useless > 0 and StatScore(data, weights) < useless then return false, 0, L.WHY_STAT end
 
     -- 2b. ¿Ya tiene ese mismo item? (equipado en alguno de sus slots posibles, o en sus bolsas si las comparte)
     local itemID = tonumber(itemLink:match("item:(%d+)"))
@@ -267,7 +270,6 @@ function Upgrade:Evaluate(itemLink, snap)
     if equipped[16] and not mainHand then return nil, 0, "LOADING" end
     local twoHander = mainHand and mainHand.equipLoc == "INVTYPE_2HWEAPON"
 
-    local weights = GetWeights(snap)
     local worstSlot, worstIlvl, worstScore
     for _, slot in ipairs(slots) do
         if slot ~= 17 or data.equipLoc ~= "INVTYPE_WEAPON" or DUAL_WIELD[snap.class] then
