@@ -139,9 +139,12 @@ function Snapshot.ToNetwork(snap, includeBags)
     }
 end
 
+-- "item:ID:...". Solo letras, números, ':' y '-' (nada de '|' ni espacios, que permitirían inyectar códigos de
+-- formato). Las letras son necesarias: los items fabricados llevan el GUID del artesano ("Player-1234-0ABCDEF0").
 local function ValidItemString(s)
-    return type(s) == "string" and #s <= 250 and s:match("^item:[%d:%-]+$") ~= nil
+    return type(s) == "string" and #s <= 250 and s:match("^item:%d+[%w:%-]*$") ~= nil
 end
+Snapshot.ValidItemString = ValidItemString
 
 local function OptString(v, maxLen, pattern)
     if type(v) ~= "string" or #v == 0 or #v > maxLen then return nil end

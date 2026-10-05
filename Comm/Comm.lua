@@ -245,8 +245,10 @@ function Comm:Dispatch(text, origin)
         ns.Debug("Ignorado (no es contacto):", originKey, msg.t)
         return
     end
-    if type(msg.st) == "number" then
-        ns.Debug(("<- %s  %s  (viaje %.1f s si ambos clientes están en este PC)"):format(originKey, msg.t, GetTime() - msg.st))
+    local travel = type(msg.st) == "number" and GetTime() - msg.st or nil
+    -- Solo tiene sentido con ambos clientes en el mismo PC (mismo reloj); con otro PC sale cualquier número.
+    if travel and travel >= 0 and travel < 600 then
+        ns.Debug(("<- %s  %s  (viaje %.1f s si ambos clientes están en este PC)"):format(originKey, msg.t, travel))
     else
         ns.Debug(("<- %s  %s"):format(originKey, msg.t))
     end
