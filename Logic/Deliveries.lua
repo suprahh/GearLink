@@ -54,19 +54,110 @@ function Deliveries:FindInBags(itemString)
     end
 end
 
-function Deliveries:PrintList()
-    local any = false
-    for _, d in pairs(Store()) do
-        any = true
-        local link = select(2, C_Item.GetItemInfo(d.item)) or d.item
-        GearLink:Print(L.DELIVERY_LINE:format(link, d.display, date("%d/%m %H:%M", d.at)))
-    end
-    if not any then GearLink:Print(L.DELIVERY_NONE) end
+-- Entregas pendientes, de la más antigua a la más nueva: { { id, d }, ... }
+function Deliveries:GetPending()
+    local list = {}
+    for id, d in pairs(Store()) do list[#list + 1] = { id = id, d = d } end
+    table.sort(list, function(a, b) return a.d.at < b.d.at end)
+    return list
+end
+
+local LOG_MAX = 30
+
+-- Historial para la pestaña Entregas: status = "SENT" (enviado por correo) o "DECLINED" (el amigo rechazó).
+function Deliveries:Log(item, display, status)
+    local log = GearLink.db.char.deliveryLog
+    table.insert(log, 1, { item = item, display = display, status = status, at = time() })
+    for i = #log, LOG_MAX + 1, -1 do log[i] = nil end
+end
+
+function Deliveries:GetLog()
+    return GearLink.db.char.deliveryLog
+end
+
+function Deliveries:ClearLog()
+    wipe(GearLink.db.char.deliveryLog)
+    GearLink:SendMessage(ns.MSG_MATCHES_UPDATED)
 end
 
 ---------------------------------------------------------------------------
 -- Preparar el correo
 ---------------------------------------------------------------------------
+
+local MAX_ATTACHMENTS = ATTACHMENTS_MAX_SEND or 12
+local LAST_BAG = NUM_TOTAL_EQUIPPED_BAG_SLOTS or NUM_BAG_SLOTS or 4
+
+local function SendTabShown()
+    return SendMailFrame and SendMailFrame:IsShown()
+end
+
+-- Pestaña "Enviar". Si el botón de la pestaña no existe o no cambia nada, se usa la función de Blizzard.
+local function ShowSendTab()
+    if SendTabShown() then return end
+    if MailFrameTab2 then MailFrameTab2:Click() end
+    if not SendTabShown() and MailFrameTab_OnClick then MailFrameTab_OnClick(nil, 2) end
+end
+
+-- Bolsa y slot actuales del item. El snapshot puede estar desfasado (el escaneo tiene debounce): se mira la bolsa en vivo.
+local function FindLiveSlot(itemString, hint)
+    local function Matches(bag, slot)
+        local info = C_Container.GetContainerItemInfo(bag, slot)
+        local link = info and not info.isLocked and info.hyperlink
+        return link and not ns.IsSecret(link) and Snapshot.ToItemString(link) == itemString
+    end
+    if hint and Matches(hint.bag, hint.slot) then return hint.bag, hint.slot end
+    for bag = BACKPACK_CONTAINER or 0, LAST_BAG do
+        for slot = 1, C_Container.GetContainerNumSlots(bag) do
+            if Matches(bag, slot) then return bag, slot end
+        end
+    end
+end
+
+local function AttachedIndex(itemString)
+    if not GetSendMailItemLink then return nil end
+    for i = 1, MAX_ATTACHMENTS do
+        local link = GetSendMailItemLink(i)
+        if link and not ns.IsSecret(link) and Snapshot.ToItemString(link) == itemString then return i end
+    end
+end
+
+-- Entregas cuyo item va adjunto en el correo que se está armando. Un mismo correo puede llevar varias.
+local function AttachedDeliveries()
+    local list = {}
+    for id, d in pairs(Store()) do
+        if AttachedIndex(d.item) then list[#list + 1] = id end
+    end
+    return list
+end
+
+local function FreeAttachmentIndex()
+    for i = 1, MAX_ATTACHMENTS do
+        if not (HasSendMailItem and HasSendMailItem(i)) then return i end
+    end
+end
+
+-- Toma el item de la bolsa y lo suelta en el primer adjunto libre.
+local function Attach(itemString, hint)
+    if AttachedIndex(itemString) then return end
+    local bag, slot = FindLiveSlot(itemString, hint)
+    local index = FreeAttachmentIndex()
+    if not (bag and index) then return end
+    ClearCursor()
+    C_Container.PickupContainerItem(bag, slot)
+    if ClickSendMailItemButton and CursorHasItem() then
+        ClickSendMailItemButton(index)
+    else
+        ClearCursor()
+        C_Container.UseContainerItem(bag, slot) -- con la pestaña Enviar abierta, usar el item lo adjunta
+    end
+    if CursorHasItem() then ClearCursor() end
+end
+
+local function FillFields(d)
+    SendMailNameEditBox:SetText(d.to or "")
+    local name = C_Item.GetItemInfo(d.item)
+    SendMailSubjectEditBox:SetText(L.MAIL_SUBJECT:format(name or L.THE_ITEM))
+end
 
 -- VERIFICAR EN FOREVER: MailFrameTab2, SendMailNameEditBox, SendMailSubjectEditBox, ClickSendMailItemButton
 function Deliveries:Prepare(id)
@@ -77,35 +168,63 @@ function Deliveries:Prepare(id)
     if item.bind == "TRADE_WINDOW" or item.bind == "SOULBOUND" then return GearLink:Print(L.DELIVERY_TRADE_ONLY) end
     if not (SendMailNameEditBox and SendMailSubjectEditBox) then return GearLink:Print(L.DELIVERY_NO_MAIL_API) end
 
-    -- Pestaña "Enviar"
-    if MailFrameTab2 and not (SendMailFrame and SendMailFrame:IsShown()) then MailFrameTab2:Click() end
+    ShowSendTab()
+    ns.Debug("preparar envío: pestaña Enviar visible =", tostring(SendTabShown()))
+    if not SendTabShown() then return GearLink:Print(L.DELIVERY_NO_MAIL_API) end
 
-    SendMailNameEditBox:SetText(d.to or "")
-    local name = C_Item.GetItemInfo(d.item)
-    SendMailSubjectEditBox:SetText(L.MAIL_SUBJECT:format(name or L.THE_ITEM))
-
-    -- Adjuntar: tomar el item de la bolsa y soltarlo en el primer adjunto.
-    ClearCursor()
-    C_Container.PickupContainerItem(item.bag, item.slot)
-    if ClickSendMailItemButton then
-        ClickSendMailItemButton()
-    else
-        ClearCursor()
-        C_Container.UseContainerItem(item.bag, item.slot) -- con el correo abierto, usar el item lo adjunta
+    -- Varias entregas al mismo amigo pueden ir en un solo correo, pero no mezclar destinatarios.
+    for _, otherId in ipairs(AttachedDeliveries()) do
+        local other = Store()[otherId]
+        if ns.Friends.Key(other.to) ~= ns.Friends.Key(d.to) then
+            return GearLink:Print(L.DELIVERY_OTHER_RECIPIENT:format(other.display))
+        end
     end
-    if CursorHasItem() then ClearCursor() end
 
+    -- Se adjunta antes de escribir el asunto: al adjuntar, el juego puede poner el nombre del item como asunto.
+    Attach(d.item, item)
+    FillFields(d)
     self.preparing = id
-    GearLink:Print(L.DELIVERY_READY:format(d.display))
+
+    -- El adjunto se confirma en el frame siguiente; si algo vació los campos al cambiar de pestaña, se vuelven a escribir.
+    C_Timer.After(0.2, function()
+        if self.preparing ~= id or not SendTabShown() then return end
+        if SendMailNameEditBox:GetText() == "" then FillFields(d) end
+        local attached = AttachedIndex(d.item) ~= nil
+        ns.Debug("preparar envío: adjunto =", tostring(attached), "destinatario =", SendMailNameEditBox:GetText())
+        if attached then
+            GearLink:Print(L.DELIVERY_READY:format(d.display))
+        else
+            GearLink:Print(L.DELIVERY_ATTACH_FAILED:format(d.display))
+        end
+    end)
+end
+
+-- Al pulsar Enviar se fija qué entregas van en el correo (al confirmarse el envío los adjuntos ya se vaciaron).
+function Deliveries:OnSendMail()
+    self.sending = AttachedDeliveries()
 end
 
 function Deliveries:MAIL_SEND_SUCCESS()
-    local id = self.preparing
-    self.preparing = nil
-    local d = id and Store()[id]
-    if not d then return end
-    GearLink:Print(L.DELIVERY_DONE:format(d.display))
-    self:Remove(id)
+    local ids = (self.sending and #self.sending > 0) and self.sending or { self.preparing }
+    self.sending, self.preparing = nil, nil
+    local any = false
+    for _, id in ipairs(ids) do
+        local d = Store()[id]
+        if d then
+            GearLink:Print(L.DELIVERY_DONE:format(d.display))
+            self:Log(d.item, d.display, "SENT")
+            Store()[id] = nil
+            any = true
+        end
+    end
+    if any then
+        ns.Matches:RequestRun()
+        self:RefreshPanel()
+    end
+end
+
+function Deliveries:MAIL_FAILED()
+    self.sending = nil
 end
 
 ---------------------------------------------------------------------------
@@ -193,9 +312,7 @@ end
 function Deliveries:RefreshPanel()
     local f = self.panel
     if not f or not (MailFrame and MailFrame:IsShown()) then return end
-    local list = {}
-    for id, d in pairs(Store()) do list[#list + 1] = { id = id, d = d } end
-    table.sort(list, function(a, b) return a.d.at < b.d.at end)
+    local list = self:GetPending()
     if #list == 0 then return f:Hide() end
 
     for i, entry in ipairs(list) do
@@ -227,9 +344,14 @@ function Deliveries:RefreshPanel()
     f:Show()
 end
 
+-- MailFrame se muestra en su propio manejador de MAIL_SHOW, que puede correr después de este (o cargarse recién ahí):
+-- se espera un frame para anclar el panel a un MailFrame ya visible.
 function Deliveries:MAIL_SHOW()
-    self.panel = self.panel or CreatePanel()
-    self:RefreshPanel()
+    C_Timer.After(0, function()
+        if not MailFrame then return end
+        self.panel = self.panel or CreatePanel()
+        self:RefreshPanel()
+    end)
 end
 
 function Deliveries:MAIL_CLOSED()
@@ -241,6 +363,8 @@ function Deliveries:OnEnable()
     self:RegisterEvent("MAIL_SHOW")
     self:RegisterEvent("MAIL_CLOSED")
     self:RegisterEvent("MAIL_SEND_SUCCESS")
+    ns.SafeRegisterEvent(self, "MAIL_FAILED")
+    if SendMail then hooksecurefunc("SendMail", function() self:OnSendMail() end) end
     -- Si las bolsas cambian con el buzón abierto (p. ej. al adjuntar), se repinta el panel.
     self:RegisterMessage(ns.MSG_SNAPSHOT_UPDATED, "RefreshPanel")
 end

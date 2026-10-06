@@ -47,6 +47,7 @@ local defaults = {
         offers = {},      -- "clave-amigo|item:..." -> time() de la última oferta (anti-spam)
         deliveries = {},  -- entregas pendientes (ofertas aceptadas): id -> { key, to, display, item, at }
         openOffers = {},  -- una oferta abierta por item: "item:..." -> { key, display, at }
+        deliveryLog = {}, -- historial (más reciente primero): { item, display, status = "SENT"|"DECLINED", at }
         -- false = automático. Valores: role = "TANK"|"HEALER"|"DAMAGER", mainStat = "STR"|"AGI"|"INT".
         override = { role = false, mainStat = false },
         -- snapshot = <último snapshot propio> (sin default: nil hasta el primer escaneo)
@@ -252,7 +253,7 @@ function GearLink:OnSlashCommand(input)
             self:Print(L.ACCEPT_TEMPLATE_CURRENT:format(rest))
         end
     elseif cmd == "deliveries" then
-        ns.Deliveries:PrintList()
+        ns.MainFrame:Open("deliveries")
     elseif cmd == "eval" then
         ns.Matches:PrintEvaluation()
     elseif cmd == "hello" then

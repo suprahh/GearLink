@@ -54,6 +54,24 @@ function Trade:GetOpenOffer(link)
     return open
 end
 
+-- Ofertas abiertas vigentes, de la más reciente a la más antigua: { { item, key, display, at, left }, ... }
+function Trade:GetOpenOffers()
+    local list = {}
+    local keys = {}
+    for itemKey in pairs(GearLink.db.char.openOffers) do keys[#keys + 1] = itemKey end
+    for _, itemKey in ipairs(keys) do -- GetOpenOffer borra las vencidas: no se modifica la tabla mientras se recorre
+        local open = self:GetOpenOffer(itemKey)
+        if open then
+            list[#list + 1] = {
+                item = itemKey, key = open.key, display = open.display, at = open.at,
+                left = open.at + (GearLink.db.global.offerCooldown or 10) * 60 - time(),
+            }
+        end
+    end
+    table.sort(list, function(a, b) return a.at > b.at end)
+    return list
+end
+
 local function CloseOpenOffer(itemKey, friendKey)
     local open = GearLink.db.char.openOffers[itemKey]
     if open and (not friendKey or open.key == friendKey) then GearLink.db.char.openOffers[itemKey] = nil end
@@ -212,6 +230,7 @@ local function OnOfferReply(msg, c)
         if sound then PlaySound(sound) end
     else
         GearLink:Print(L.OFFER_DECLINED:format(view.displayName))
+        if itemKey then ns.Deliveries:Log(itemKey, view.displayName, "DECLINED") end
     end
     GearLink:SendMessage(ns.MSG_MATCHES_UPDATED) -- el 🎁 vuelve a permitir ofrecerlo a otros
 end

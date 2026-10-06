@@ -3,7 +3,7 @@
 ## Notes: Comparte tu equipo e inventario con amigos que usan GearLink y ofréceles mejoras.
 ## Notes-esMX: Comparte tu equipo e inventario con amigos que usan GearLink y ofréceles mejoras.
 ## Author: Carlos
-## Version: 0.7.3
+## Version: 0.8.0
 ## X-Website: https://github.com/suprahh/GearLink
 ## Category: Inventory
 ## IconTexture: Interface\Icons\INV_Misc_Bag_10
@@ -33,6 +33,7 @@ Logic\Deliveries.lua
 UI\GearView.lua
 UI\MainFrame.lua
 UI\FriendsTab.lua
+UI\DeliveriesTab.lua
 UI\Toast.lua
 UI\Tooltip.lua
 UI\OfferPopup.lua
