@@ -9,7 +9,8 @@
 --   2. ¿El stat principal coincide con el suyo? (si el item tiene stats principales)
 --   3. Slot: anillos/abalorios/armas a una mano se comparan contra el PEOR de los dos slots; con un arma a dos
 --      manos equipada, la mano izquierda cuenta como ocupada por ella.
---   4. ¿Es mejor? Primero nivel de item; si empata, stats ponderadas por rol (ns.StatWeights).
+--   4. ¿Es mejor? Puntuación por rol (ns.StatWeights): stats + armadura + DPS del arma. El nivel de item solo
+--      desempata: en Classic un item de más nivel puede ser peor (p. ej. tela gris sin stats contra cuero).
 --
 -- Sin estado: solo lee la caché de items del cliente. Se puede probar con /gl eval.
 local _, ns = ...
@@ -20,15 +21,18 @@ ns.Upgrade = Upgrade
 
 ---------------------------------------------------------------------------
 -- Pesos de stats (editables). Se busca primero por árbol (ns.StatWeights.PROT) y si no, por rol_stat.
+-- ARMOR: por punto de armadura. Todos los roles la valoran algo (decide entre piezas sin stats, p. ej. tela vs cuero);
+--   +1 de stat principal equivale a ~20 de armadura para DPS/healers y ~10 para tanques.
+-- DPS: por punto de daño por segundo del arma. 1 DPS ~ 14 de poder de ataque ~ 7 de stat principal en melé/caza.
 ---------------------------------------------------------------------------
 
 ns.StatWeights = {
-    TANK_STR = { STA = 1.0, STR = 0.8, AGI = 0.5, DEF = 1.0, DODGE = 0.8, PARRY = 0.8, BLOCK = 0.5, BLOCKVALUE = 0.2, ARMOR = 0.02 },
-    TANK_AGI = { STA = 1.0, AGI = 0.8, STR = 0.5, DEF = 1.0, DODGE = 0.8, ARMOR = 0.02 },
-    DAMAGER_STR = { STR = 1.0, AGI = 0.6, STA = 0.3, AP = 0.5, CRIT = 0.8, HIT = 0.9 },
-    DAMAGER_AGI = { AGI = 1.0, STR = 0.4, STA = 0.3, AP = 0.5, RAP = 0.4, CRIT = 0.8, HIT = 0.9 },
-    DAMAGER_INT = { INT = 1.0, SPI = 0.4, STA = 0.3, SP = 0.9, CRIT = 0.6, HIT = 0.7 },
-    HEALER_INT = { INT = 1.0, SPI = 0.7, STA = 0.3, HEAL = 0.8, SP = 0.6, MP5 = 1.2 },
+    TANK_STR = { STA = 1.0, STR = 0.8, AGI = 0.5, DEF = 1.0, DODGE = 0.8, PARRY = 0.8, BLOCK = 0.5, BLOCKVALUE = 0.2, ARMOR = 0.1, DPS = 3 },
+    TANK_AGI = { STA = 1.0, AGI = 0.8, STR = 0.5, DEF = 1.0, DODGE = 0.8, ARMOR = 0.1, DPS = 3 },
+    DAMAGER_STR = { STR = 1.0, AGI = 0.6, STA = 0.3, AP = 0.5, CRIT = 0.8, HIT = 0.9, ARMOR = 0.05, DPS = 6 },
+    DAMAGER_AGI = { AGI = 1.0, STR = 0.4, STA = 0.3, AP = 0.5, RAP = 0.4, CRIT = 0.8, HIT = 0.9, ARMOR = 0.05, DPS = 6 },
+    DAMAGER_INT = { INT = 1.0, SPI = 0.4, STA = 0.3, SP = 0.9, CRIT = 0.6, HIT = 0.7, ARMOR = 0.05, DPS = 0.5 },
+    HEALER_INT = { INT = 1.0, SPI = 0.7, STA = 0.3, HEAL = 0.8, SP = 0.6, MP5 = 1.2, ARMOR = 0.05, DPS = 0.5 },
 }
 
 local STAT_KEYS = {
@@ -43,11 +47,13 @@ local STAT_KEYS = {
     ITEM_MOD_DEFENSE_SKILL_RATING_SHORT = "DEF", ITEM_MOD_DODGE_RATING_SHORT = "DODGE",
     ITEM_MOD_PARRY_RATING_SHORT = "PARRY", ITEM_MOD_BLOCK_RATING_SHORT = "BLOCK", ITEM_MOD_BLOCK_VALUE_SHORT = "BLOCKVALUE",
     ITEM_MOD_MANA_REGENERATION_SHORT = "MP5", ITEM_MOD_POWER_REGEN0_SHORT = "MP5",
-    RESISTANCE0_NAME = "ARMOR",
+    RESISTANCE0_NAME = "ARMOR", ITEM_MOD_DAMAGE_PER_SECOND_SHORT = "DPS",
 }
 local PRIMARY = { STR = true, AGI = true, INT = true }
 -- Un stat principal con peso menor que esto "no le sirve" al rol (ej. Intelecto para un guerrero).
 local USEFUL_PRIMARY_WEIGHT = 0.5
+-- Diferencias de puntuación menores que esto cuentan como empate.
+local SCORE_EPSILON = 0.05
 
 local function GetWeights(snap)
     local W = ns.StatWeights
@@ -109,6 +115,16 @@ local EQUIP_LOC_SLOTS = {
 ---------------------------------------------------------------------------
 
 local CLASSES_PATTERN = ns.FormatToPattern(ITEM_CLASSES_ALLOWED, true)
+-- Respaldo si GetItemStats no trae armadura o DPS: "%s de armadura", "(%s daño por segundo)".
+local ARMOR_PATTERN = ns.FormatToPattern(ARMOR_TEMPLATE, true)
+local DPS_PATTERN = ns.FormatToPattern(DPS_TEMPLATE, true)
+
+-- "1.234" / "4,5" -> número (armadura: entero con separador de miles; DPS: decimal con coma o punto)
+local function ParseNumber(text, decimal)
+    if not text then return nil end
+    if decimal then return tonumber((text:gsub(",", "."):match("[%d%.]+"))) end
+    return tonumber((text:gsub("[^%d]", "")))
+end
 
 local itemCache, itemCacheSize = {}, 0
 
@@ -131,15 +147,16 @@ function Upgrade:GetItemData(link)
         end
     end
 
-    -- "Clases: Mago, Brujo" (texto localizado del tooltip)
+    -- Tooltip: "Clases: Mago, Brujo" y, si faltaron en GetItemStats, armadura y DPS (textos localizados).
     local classesAllowed
-    if CLASSES_PATTERN and C_TooltipInfo and C_TooltipInfo.GetHyperlink then
+    if C_TooltipInfo and C_TooltipInfo.GetHyperlink then
         local data = C_TooltipInfo.GetHyperlink(link)
         for _, line in ipairs(data and data.lines or {}) do
             local text = line.leftText
             if type(text) == "string" and not ns.IsSecret(text) then
-                local list = text:match(CLASSES_PATTERN)
-                if list then classesAllowed = list break end
+                classesAllowed = classesAllowed or (CLASSES_PATTERN and text:match(CLASSES_PATTERN))
+                if not stats.ARMOR and ARMOR_PATTERN then stats.ARMOR = ParseNumber(text:match("^" .. ARMOR_PATTERN .. "$")) end
+                if not stats.DPS and DPS_PATTERN then stats.DPS = ParseNumber(text:match(DPS_PATTERN), true) end
             end
         end
     end
@@ -281,7 +298,7 @@ function Upgrade:Evaluate(itemLink, snap)
                 if not cur then return nil, 0, "LOADING" end
                 ilvl, score = cur.ilvl or 0, StatScore(cur, weights)
             end
-            if not worstSlot or ilvl < worstIlvl or (ilvl == worstIlvl and score < worstScore) then
+            if not worstSlot or score < worstScore or (score == worstScore and ilvl < worstIlvl) then
                 worstSlot, worstIlvl, worstScore = slot, ilvl, score
             end
         end
@@ -295,11 +312,13 @@ function Upgrade:Evaluate(itemLink, snap)
     if not equipped[worstSlot] and not (worstSlot == 17 and twoHander) then
         return true, 1000 + (data.ilvl or 0), L.REASON_EMPTY:format(slotName), worstSlot
     end
-    if diff > 0 then
-        return true, diff * 10 + newScore / 100, L.REASON_ILVL:format(diff, slotName), worstSlot
+    local gain = newScore - worstScore
+    if gain > SCORE_EPSILON then
+        return true, gain, L.REASON_STATS:format(slotName, gain), worstSlot
     end
-    if diff == 0 and newScore > worstScore + 0.01 then
-        return true, newScore - worstScore, L.REASON_STATS:format(slotName), worstSlot
+    -- Misma puntuación (p. ej. dos piezas sin stats ni armadura conocida): desempata el nivel de item.
+    if gain >= -SCORE_EPSILON and diff > 0 then
+        return true, diff / 100, L.REASON_ILVL:format(diff, slotName), worstSlot
     end
-    return false, 0, diff < 0 and L.WHY_LOWER:format(-diff, slotName) or L.WHY_NOT_BETTER:format(slotName)
+    return false, 0, L.WHY_NOT_BETTER:format(slotName)
 end
